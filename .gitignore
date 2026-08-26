@@ -1,0 +1,6 @@
+.env
+
+# Compiled binaries — `go build` drops one named after the module.
+mailtea-go-example
+*.exe
+*.test
