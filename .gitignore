@@ -4,3 +4,12 @@
 mailtea-go-example
 *.exe
 *.test
+
+# Written by `go mod tidy` on first build; the one dependency is the Mailtea
+# SDK, resolved from its module path.
+go.sum
+
+# A local override pointing the SDK at a checkout on this machine. Paths in it
+# exist nowhere else.
+go.work
+go.work.sum

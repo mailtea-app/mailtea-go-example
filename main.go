@@ -1,5 +1,6 @@
-// Command mailtea-go-example walks the transactional email path against the
-// Mailtea HTTP API: send one now, schedule one for later, look it up, cancel it.
+// Command mailtea-go-example walks the transactional email path with the
+// official Mailtea Go SDK: send one now, schedule one for later, look it up,
+// cancel it.
 package main
 
 import (
@@ -14,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mailtea-app/mailtea-go-example/mailtea"
+	"github.com/mailtea-app/mailtea-go"
 )
 
 func main() {
@@ -24,22 +25,21 @@ func main() {
 		log.Fatalf("reading .env: %v", err)
 	}
 
-	apiKey := os.Getenv("MAILTEA_API_KEY")
-	if apiKey == "" {
-		log.Fatal("MAILTEA_API_KEY is not set. Copy .env.example to .env and add your key.")
+	// The key comes from MAILTEA_API_KEY, and the base URL from
+	// MAILTEA_API_BASE_URL when it is set — only needed for local dev or a
+	// self-hosted Mailtea. Unset in production and the SDK uses
+	// https://api.mailtea.app.
+	client, err := mailtea.New(os.Getenv("MAILTEA_API_KEY"))
+	if err != nil {
+		// A missing key is reported here rather than as a 401 on the first send.
+		log.Fatalf("%v\nCopy .env.example to .env and add your key.", err)
 	}
-
-	client := mailtea.New(apiKey, mailtea.Options{
-		// Only needed for local dev or a self-hosted Mailtea. Unset in
-		// production, and the client falls back to https://api.mailtea.app.
-		BaseURL: os.Getenv("MAILTEA_API_BASE_URL"),
-	})
 
 	d := demo{
 		from: envOr("MAILTEA_FROM", "Acme <hello@acme.com>"),
 		to:   envOr("MAILTEA_TO", "reader@yourdomain.com"),
-		// A per-run suffix, so repeat runs are easy to tell apart in the
-		// Mailtea dashboard and in the recipient's inbox.
+		// A per-run suffix, so repeat runs are easy to tell apart in Mailtea
+		// Studio and in the recipient's inbox.
 		subject: "Hello from Go (" + runSuffix() + ")",
 	}
 
@@ -49,7 +49,7 @@ func main() {
 	if err := run(ctx, client, d, os.Stdout); err != nil {
 		// The API says why in plain words — a bad key, an unverified domain, a
 		// field it rejected. Printing only "request failed" throws that away.
-		var apiErr *mailtea.APIError
+		var apiErr *mailtea.Error
 		if errors.As(err, &apiErr) {
 			log.Fatalf("%v\nresponse: %s", err, apiErr.Body)
 		}
@@ -67,12 +67,12 @@ type demo struct {
 // API; the tests point it at a mock.
 func run(ctx context.Context, client *mailtea.Client, d demo, out io.Writer) error {
 	// 1. Send one email now.
-	sent, err := client.SendEmail(ctx, mailtea.SendEmailRequest{
+	sent, err := client.Emails.Send(ctx, mailtea.SendEmailRequest{
 		From:    d.from,
 		To:      []string{d.to},
 		Subject: d.subject,
-		HTML:    "<p>Sent from a Go program, straight through the Mailtea HTTP API.</p>",
-		Text:    "Sent from a Go program, straight through the Mailtea HTTP API.",
+		HTML:    "<p>Sent from a Go program with the Mailtea SDK.</p>",
+		Text:    "Sent from a Go program with the Mailtea SDK.",
 		Tags:    []mailtea.Tag{{Name: "example", Value: "go"}},
 	})
 	if err != nil {
@@ -80,9 +80,9 @@ func run(ctx context.Context, client *mailtea.Client, d demo, out io.Writer) err
 	}
 	fmt.Fprintf(out, "sent:      %s  %s\n", sent.ID, d.subject)
 
-	// 2. Schedule one. Same call, plus scheduled_at.
+	// 2. Schedule one. Same call, plus ScheduledAt.
 	scheduledAt := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
-	scheduled, err := client.SendEmail(ctx, mailtea.SendEmailRequest{
+	scheduled, err := client.Emails.Send(ctx, mailtea.SendEmailRequest{
 		From:        d.from,
 		To:          []string{d.to},
 		Subject:     d.subject + " (scheduled)",
@@ -95,18 +95,18 @@ func run(ctx context.Context, client *mailtea.Client, d demo, out io.Writer) err
 	fmt.Fprintf(out, "scheduled: %s  for %s\n", scheduled.ID, scheduledAt)
 
 	// 3. Look it up.
-	email, err := client.GetEmail(ctx, scheduled.ID)
+	email, err := client.Emails.Get(ctx, scheduled.ID)
 	if err != nil {
 		return fmt.Errorf("lookup failed: %w", err)
 	}
-	fmt.Fprintf(out, "lookup:    %s  last_event=%s\n", email.ID, email.LastEvent)
+	fmt.Fprintf(out, "lookup:    %s  status=%s\n", email.ID, email.Status)
 
-	// 4. Cancel it while it is still queued.
-	canceled, err := client.CancelEmail(ctx, scheduled.ID)
+	// 4. Cancel it while it is still scheduled.
+	canceled, err := client.Emails.Cancel(ctx, scheduled.ID)
 	if err != nil {
 		return fmt.Errorf("cancel failed: %w", err)
 	}
-	fmt.Fprintf(out, "canceled:  %s\n", canceled.ID)
+	fmt.Fprintf(out, "canceled:  %s\n", canceled.String("id"))
 
 	return nil
 }
@@ -127,9 +127,9 @@ func envOr(key, fallback string) string {
 }
 
 // loadEnvFile reads a .env file into the process environment. Go ships no
-// dotenv in its standard library and this example takes no dependencies, so
-// these are the twenty lines that make `cp .env.example .env` work. Real
-// environment variables win, and a missing file is not an error.
+// dotenv in its standard library and this example takes no dependencies beyond
+// the SDK, so these are the twenty lines that make `cp .env.example .env` work.
+// Real environment variables win, and a missing file is not an error.
 func loadEnvFile(path string) error {
 	raw, err := os.ReadFile(path)
 	if err != nil {

@@ -11,14 +11,23 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mailtea-app/mailtea-go-example/mailtea"
+	"github.com/mailtea-app/mailtea-go"
 )
+
+func newClient(t *testing.T, baseURL string) *mailtea.Client {
+	t.Helper()
+	client, err := mailtea.New("mt_pat_test_key", mailtea.WithBaseURL(baseURL))
+	if err != nil {
+		t.Fatalf("mailtea.New: %v", err)
+	}
+	return client
+}
 
 func TestSendEmailPostsToTheAPI(t *testing.T) {
 	mock := startMockMailtea(t)
-	client := mailtea.New("mt_pat_test_key", mailtea.Options{BaseURL: mock.URL})
+	client := newClient(t, mock.URL)
 
-	sent, err := client.SendEmail(context.Background(), mailtea.SendEmailRequest{
+	sent, err := client.Emails.Send(context.Background(), mailtea.SendEmailRequest{
 		From:    "Acme <hello@acme.com>",
 		To:      []string{"reader@yourdomain.com"},
 		Subject: "Hello from Go",
@@ -26,7 +35,7 @@ func TestSendEmailPostsToTheAPI(t *testing.T) {
 		Tags:    []mailtea.Tag{{Name: "example", Value: "go"}},
 	})
 	if err != nil {
-		t.Fatalf("SendEmail: %v", err)
+		t.Fatalf("Send: %v", err)
 	}
 
 	req := mock.last(t)
@@ -50,16 +59,16 @@ func TestSendEmailPostsToTheAPI(t *testing.T) {
 
 func TestSendEmailSchedulesWithScheduledAt(t *testing.T) {
 	mock := startMockMailtea(t)
-	client := mailtea.New("mt_pat_test_key", mailtea.Options{BaseURL: mock.URL})
+	client := newClient(t, mock.URL)
 
-	if _, err := client.SendEmail(context.Background(), mailtea.SendEmailRequest{
+	if _, err := client.Emails.Send(context.Background(), mailtea.SendEmailRequest{
 		From:        "Acme <hello@acme.com>",
 		To:          []string{"reader@yourdomain.com"},
 		Subject:     "Later",
 		Text:        "Later",
 		ScheduledAt: "2026-09-01T09:00:00Z",
 	}); err != nil {
-		t.Fatalf("SendEmail: %v", err)
+		t.Fatalf("Send: %v", err)
 	}
 
 	assertField(t, mock.last(t).Body, "scheduled_at", "2026-09-01T09:00:00Z")
@@ -67,44 +76,41 @@ func TestSendEmailSchedulesWithScheduledAt(t *testing.T) {
 
 func TestGetAndCancelHitTheRightRoutes(t *testing.T) {
 	mock := startMockMailtea(t)
-	client := mailtea.New("mt_pat_test_key", mailtea.Options{BaseURL: mock.URL})
+	client := newClient(t, mock.URL)
 
-	email, err := client.GetEmail(context.Background(), mockEmailID)
+	email, err := client.Emails.Get(context.Background(), mockEmailID)
 	if err != nil {
-		t.Fatalf("GetEmail: %v", err)
+		t.Fatalf("Get: %v", err)
 	}
 	if got := mock.last(t); got.Method != http.MethodGet || got.Path != "/v1/emails/"+mockEmailID {
 		t.Errorf("got %s %s, want GET /v1/emails/%s", got.Method, got.Path, mockEmailID)
 	}
-	if email.LastEvent != "scheduled" {
-		t.Errorf("last_event = %q, want %q", email.LastEvent, "scheduled")
+	// The SDK aliases the API's last_event to the friendlier Status.
+	if email.Status != "scheduled" {
+		t.Errorf("status = %q, want %q", email.Status, "scheduled")
 	}
 
-	if _, err := client.CancelEmail(context.Background(), mockEmailID); err != nil {
-		t.Fatalf("CancelEmail: %v", err)
+	if _, err := client.Emails.Cancel(context.Background(), mockEmailID); err != nil {
+		t.Fatalf("Cancel: %v", err)
 	}
 	if got := mock.last(t); got.Method != http.MethodPost || got.Path != "/v1/emails/"+mockEmailID+"/cancel" {
 		t.Errorf("got %s %s, want POST /v1/emails/%s/cancel", got.Method, got.Path, mockEmailID)
 	}
 }
 
-func TestMissingKeyIsRejected(t *testing.T) {
-	mock := startMockMailtea(t)
-	client := mailtea.New("", mailtea.Options{BaseURL: mock.URL})
+func TestMissingKeyIsReportedBeforeAnyRequest(t *testing.T) {
+	t.Setenv("MAILTEA_API_KEY", "")
 
-	_, err := client.SendEmail(context.Background(), mailtea.SendEmailRequest{
-		From:    "Acme <hello@acme.com>",
-		To:      []string{"reader@yourdomain.com"},
-		Subject: "No key",
-		Text:    "No key",
-	})
+	_, err := mailtea.New("")
 
-	var apiErr *mailtea.APIError
+	// The SDK refuses to build a keyless client, so the mistake surfaces as a
+	// typed client-side error rather than a 401 halfway through a send.
+	var apiErr *mailtea.Error
 	if !errors.As(err, &apiErr) {
-		t.Fatalf("err = %v, want a *mailtea.APIError", err)
+		t.Fatalf("err = %v, want a *mailtea.Error", err)
 	}
-	if apiErr.StatusCode != http.StatusUnauthorized {
-		t.Errorf("status = %d, want 401", apiErr.StatusCode)
+	if apiErr.Status != 0 || apiErr.Code != "missing_api_key" {
+		t.Errorf("status/code = %d/%q, want 0/missing_api_key", apiErr.Status, apiErr.Code)
 	}
 }
 
@@ -113,28 +119,32 @@ func TestAPIErrorSurfacesTheAPIMessage(t *testing.T) {
 	// and said why, so the message has to survive the trip back to the caller.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("x-request-id", "req_abc123")
 		w.WriteHeader(http.StatusUnprocessableEntity)
 		_, _ = w.Write([]byte(`{"error":"Domain is not verified","details":[{"path":["from"]}]}`))
 	}))
 	defer server.Close()
 
-	client := mailtea.New("mt_pat_test_key", mailtea.Options{BaseURL: server.URL})
-	_, err := client.SendEmail(context.Background(), mailtea.SendEmailRequest{
+	client := newClient(t, server.URL)
+	_, err := client.Emails.Send(context.Background(), mailtea.SendEmailRequest{
 		From:    "Acme <hello@unverified.example.org>",
 		To:      []string{"reader@yourdomain.com"},
 		Subject: "Nope",
 		Text:    "Nope",
 	})
 
-	var apiErr *mailtea.APIError
+	var apiErr *mailtea.Error
 	if !errors.As(err, &apiErr) {
-		t.Fatalf("err = %v, want a *mailtea.APIError", err)
+		t.Fatalf("err = %v, want a *mailtea.Error", err)
 	}
-	if apiErr.StatusCode != http.StatusUnprocessableEntity {
-		t.Errorf("status = %d, want 422", apiErr.StatusCode)
+	if apiErr.Status != http.StatusUnprocessableEntity {
+		t.Errorf("status = %d, want 422", apiErr.Status)
 	}
 	if apiErr.Message != "Domain is not verified" {
 		t.Errorf("message = %q, want %q", apiErr.Message, "Domain is not verified")
+	}
+	if apiErr.RequestID != "req_abc123" {
+		t.Errorf("requestID = %q, want the x-request-id header", apiErr.RequestID)
 	}
 	if !strings.Contains(err.Error(), "Domain is not verified") {
 		t.Errorf("Error() = %q, want it to carry the API message", err.Error())
@@ -146,7 +156,7 @@ func TestAPIErrorSurfacesTheAPIMessage(t *testing.T) {
 
 func TestRunWalksTheWholeFlow(t *testing.T) {
 	mock := startMockMailtea(t)
-	client := mailtea.New("mt_pat_test_key", mailtea.Options{BaseURL: mock.URL})
+	client := newClient(t, mock.URL)
 
 	var out bytes.Buffer
 	d := demo{from: "Acme <hello@acme.com>", to: "reader@yourdomain.com", subject: "Hello from Go (test)"}

@@ -3,10 +3,10 @@
 This example shows how to use [Mailtea](https://mailtea.app) with Go to send,
 schedule, look up, and cancel transactional email.
 
-There is no official Mailtea SDK for Go, so this calls the HTTP API directly
-with `net/http` and `encoding/json` — the standard library and nothing else. The
-client is one file, [`mailtea/client.go`](mailtea/client.go), written to be read
-in one sitting and copied into your own project.
+It uses the official Go SDK,
+[`github.com/mailtea-app/mailtea-go`](https://github.com/mailtea-app/mailtea-go) —
+a thin, typed wrapper over the REST API with no dependencies outside the
+standard library.
 
 ## Prerequisites
 
@@ -15,13 +15,13 @@ To get the most out of this guide, you'll need to:
 - [Create an API key](https://studio.mailtea.app/api-keys)
 - [Verify your domain](https://docs.mailtea.app/docs/documentation/domains)
 
-Go 1.18 or newer. There is nothing to download.
+Go 1.18 or newer.
 
 ## Instructions
 
-1. Install dependencies — there are none, so this just checks the module builds:
+1. Fetch the SDK:
    ```bash
-   go build ./...
+   go mod tidy
    ```
 2. Copy `.env.example` to `.env` and add your API key:
    ```bash
@@ -35,34 +35,35 @@ Go 1.18 or newer. There is nothing to download.
 ```
 sent:      txemail_8d68ce5aa35949229fa4ab62b912ea02  Hello from Go (c710deec)
 scheduled: txemail_682de31c8a034aa5ba0de55de198b81d  for 2026-08-26T15:22:36Z
-lookup:    txemail_682de31c8a034aa5ba0de55de198b81d  last_event=scheduled
+lookup:    txemail_682de31c8a034aa5ba0de55de198b81d  status=scheduled
 canceled:  txemail_682de31c8a034aa5ba0de55de198b81d
 ```
 
 Go has no dotenv in its standard library, and this example takes no
-dependencies, so `main.go` reads `.env` itself in about twenty lines. Real
-environment variables win over the file, and a missing file is not an error —
-export `MAILTEA_API_KEY` instead if you would rather.
+dependencies beyond the SDK, so `main.go` reads `.env` itself in about twenty
+lines. Real environment variables win over the file, and a missing file is not
+an error — export `MAILTEA_API_KEY` instead if you would rather.
 
-## Using the client
+## Using the SDK
 
 ```go
-client := mailtea.New(os.Getenv("MAILTEA_API_KEY"), mailtea.Options{
-	// Only needed for local dev or a self-hosted Mailtea. Omit in production
-	// and the client uses https://api.mailtea.app.
-	BaseURL: os.Getenv("MAILTEA_API_BASE_URL"),
-})
+import "github.com/mailtea-app/mailtea-go" // package mailtea
+
+// The key comes from MAILTEA_API_KEY when you pass "", and the base URL from
+// MAILTEA_API_BASE_URL — only needed for local dev or a self-hosted Mailtea.
+// Unset in production and the SDK uses https://api.mailtea.app.
+client, err := mailtea.New(os.Getenv("MAILTEA_API_KEY"))
 ```
 
 ### Send an email
 
 ```go
-sent, err := client.SendEmail(ctx, mailtea.SendEmailRequest{
+sent, err := client.Emails.Send(ctx, mailtea.SendEmailRequest{
 	From:    "Acme <hello@acme.com>",
 	To:      []string{"reader@yourdomain.com"},
 	Subject: "Hello from Go",
-	HTML:    "<p>Sent with the Mailtea API.</p>",
-	Text:    "Sent with the Mailtea API.",
+	HTML:    "<p>Sent with the Mailtea SDK.</p>",
+	Text:    "Sent with the Mailtea SDK.",
 	Tags:    []mailtea.Tag{{Name: "example", Value: "go"}},
 })
 // sent.ID == "txemail_8d68ce5aa35949229fa4ab62b912ea02"
@@ -76,7 +77,7 @@ recipients combined** across `to` + `cc` + `bcc`.
 Scheduling is the same call with `ScheduledAt` set to an RFC 3339 timestamp.
 
 ```go
-scheduled, err := client.SendEmail(ctx, mailtea.SendEmailRequest{
+scheduled, err := client.Emails.Send(ctx, mailtea.SendEmailRequest{
 	From:        "Acme <hello@acme.com>",
 	To:          []string{"reader@yourdomain.com"},
 	Subject:     "Hello from Go (scheduled)",
@@ -84,7 +85,7 @@ scheduled, err := client.SendEmail(ctx, mailtea.SendEmailRequest{
 	ScheduledAt: time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
 })
 
-_, err = client.CancelEmail(ctx, scheduled.ID)
+_, err = client.Emails.Cancel(ctx, scheduled.ID)
 ```
 
 Cancelling works only while the email is still `scheduled`. Any other status —
@@ -94,29 +95,31 @@ for scheduled mail only, not an undo button on a send already on its way.
 ### Look up a send
 
 ```go
-email, err := client.GetEmail(ctx, sent.ID)
+email, err := client.Emails.Get(ctx, sent.ID)
 // queued, scheduled, sent, delivered, delivery_delayed,
 // bounced, complained, failed, suppressed, canceled
-email.LastEvent
+email.Status
 ```
 
-`LastEvent` is how you check on a send without setting up a webhook.
+`Status` is how you check on a send without setting up a webhook. It is the
+SDK's friendly alias of the API's `last_event`, which `email.LastEvent` also
+carries verbatim.
 
 ### Handling errors
 
-Every non-2xx comes back as a `*mailtea.APIError` carrying the status, the
-API's own message, and the raw body — which holds the `details` array naming
-the field that failed validation.
+Every failure comes back as a `*mailtea.Error` carrying the status, the API's
+own message, its machine-readable `code`, the `x-request-id`, and the raw body —
+which holds the `details` array naming the field that failed validation.
 
 ```go
-var apiErr *mailtea.APIError
+var apiErr *mailtea.Error
 if errors.As(err, &apiErr) {
 	log.Fatalf("%v\nresponse: %s", err, apiErr.Body)
 }
 ```
 
 ```
-send failed: mailtea: API error 401: Unauthorized
+send failed: mailtea: Unauthorized (status 401, request id 0f0c…)
 response: {"error":"Unauthorized"}
 ```
 
@@ -125,20 +128,24 @@ domain isn't verified yet".
 
 ### Endpoints
 
-| Client method | Request |
+| SDK call | Request |
 |---|---|
-| `SendEmail` | `POST /v1/emails` |
-| `SendEmail` with `ScheduledAt` | `POST /v1/emails` |
-| `GetEmail` | `GET /v1/emails/{id}` |
-| `CancelEmail` | `POST /v1/emails/{id}/cancel` |
+| `Emails.Send` | `POST /v1/emails` |
+| `Emails.Send` with `ScheduledAt` | `POST /v1/emails` |
+| `Emails.Get` | `GET /v1/emails/{id}` |
+| `Emails.Cancel` | `POST /v1/emails/{id}/cancel` |
+
+The SDK covers the rest of the API too — contacts, posts, topics, templates,
+domains, webhooks, automations. See its
+[README](https://github.com/mailtea-app/mailtea-go#api).
 
 ## What this example covers
 
-- Calling the Mailtea HTTP API from Go with no SDK and no dependencies
+- Calling Mailtea from Go with the official SDK
 - Sending an email with `html`, `text`, and `tags`
-- Scheduling a send with `scheduled_at`, then cancelling it
-- Reading a send's `last_event` to see where it got to
-- Typed errors: `*mailtea.APIError` surfaces the API's own message on any non-2xx
+- Scheduling a send with `ScheduledAt`, then cancelling it
+- Reading a send's `Status` to see where it got to
+- Typed errors: `*mailtea.Error` surfaces the API's own message on any non-2xx
 - Keeping the API key in the environment, never in the source or in git
 
 ## Tests
@@ -157,6 +164,7 @@ the method, path, `Authorization` header, and body of each one.
 
 - [Documentation](https://docs.mailtea.app)
 - [API reference](https://docs.mailtea.app/docs/api-reference)
-- [Node.js SDK](https://github.com/mailtea-app/mailtea-node) ·
+- [Go SDK](https://github.com/mailtea-app/mailtea-go) ·
+  [Node.js SDK](https://github.com/mailtea-app/mailtea-node) ·
   [Python SDK](https://github.com/mailtea-app/mailtea-python) ·
   [MCP server](https://github.com/mailtea-app/mailtea-mcp)

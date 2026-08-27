@@ -13,5 +13,9 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.22'
+      # go.sum is not committed: the only dependency is the Mailtea SDK, and
+      # tidy resolves and records it on a fresh clone exactly as it does for
+      # anyone following the README.
+      - run: go mod tidy
       - run: go vet ./...
       - run: go test ./...
